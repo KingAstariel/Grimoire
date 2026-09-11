@@ -284,6 +284,21 @@
     font-family:'EB Garamond',serif;font-size:14px;line-height:1.4;color:var(--ink);
     resize:none;outline:none;overflow:hidden;
   }
+  .tl-parts{margin:2px 0;}
+  .tl-parts > .tl-addlink-btn{margin:6px 12px 0;display:inline-block;}
+  .tl-part{
+    padding-top:6px;margin-top:6px;
+    border-top:1px dashed var(--umber);
+  }
+  .tl-part:first-child{border-top:none;margin-top:0;padding-top:0;}
+  .tl-part-label-row{
+    display:flex;align-items:center;gap:4px;padding:0 12px;
+  }
+  .tl-part-label{
+    flex:1;font-family:'Cinzel',serif;font-weight:600;font-size:12.5px;
+    color:var(--umber);background:transparent;border:none;outline:none;padding:2px 0;
+  }
+  .tl-part-label::placeholder{color:var(--umber);opacity:.7;}
   .tl-beat .tl-footer{
     margin:6px 12px 0;
   }
@@ -1924,11 +1939,56 @@ function renderTimeline(b){
     titleInput.addEventListener('input', ()=>{ beat.title=titleInput.value; scheduleSave(); });
     card.appendChild(titleInput);
 
-    const ta = document.createElement('textarea');
-    ta.value = beat.text||'';
-    ta.placeholder = 'Résumé des événements…';
-    ta.addEventListener('input', ()=>{ beat.text=ta.value; autoGrow(ta, ta); scheduleSave(); positionBeatCard(card, x, spineY, above, cardW); drawConnectors(b); });
-    card.appendChild(ta);
+    if(!beat.parts || !beat.parts.length){
+      beat.parts = [{id:uid('pt'), label:'', text: beat.text||''}];
+      delete beat.text;
+    }
+    const partsWrap = document.createElement('div');
+    partsWrap.className = 'tl-parts';
+    beat.parts.forEach((part, pi)=>{
+      const partEl = document.createElement('div');
+      partEl.className = 'tl-part';
+      const labelRow = document.createElement('div');
+      labelRow.className = 'tl-part-label-row';
+      const labelInput = document.createElement('input');
+      labelInput.className='tl-part-label'; labelInput.value = part.label||'';
+      labelInput.placeholder = 'Personnage / partie';
+      labelInput.addEventListener('input', ()=>{ part.label=labelInput.value; scheduleSave(); });
+      labelRow.appendChild(labelInput);
+      if(beat.parts.length>1){
+        const delPartBtn = mkBtn('✕', ()=>{
+          if(confirm('Supprimer cette partie ?')){
+            beat.parts.splice(pi,1);
+            scheduleSave();
+            renderTimeline(b);
+          }
+        });
+        labelRow.appendChild(delPartBtn);
+      }
+      partEl.appendChild(labelRow);
+      const partTa = document.createElement('textarea');
+      partTa.value = part.text||'';
+      partTa.placeholder = 'Résumé des événements…';
+      partTa.addEventListener('input', ()=>{
+        part.text = partTa.value;
+        autoGrow(partTa, partTa);
+        scheduleSave();
+        positionBeatCard(card, x, spineY, above, cardW);
+        drawConnectors(b);
+      });
+      partEl.appendChild(partTa);
+      partsWrap.appendChild(partEl);
+      requestAnimationFrame(()=>autoGrow(partTa, partTa));
+    });
+    const addPartBtn = document.createElement('button');
+    addPartBtn.className='tl-addlink-btn'; addPartBtn.textContent='+ Ajouter une partie';
+    addPartBtn.addEventListener('click', ()=>{
+      beat.parts.push({id:uid('pt'), label:'', text:''});
+      scheduleSave();
+      renderTimeline(b);
+    });
+    partsWrap.appendChild(addPartBtn);
+    card.appendChild(partsWrap);
 
     const footer = document.createElement('div');
     footer.className='tl-footer';
@@ -1946,6 +2006,7 @@ function renderTimeline(b){
       footer.appendChild(addBtn);
     }
     card.appendChild(footer);
+
 
     const widthHandle = document.createElement('div');
     widthHandle.className='tl-width-handle';
@@ -1972,7 +2033,6 @@ function renderTimeline(b){
 
     canvas.appendChild(card);
     requestAnimationFrame(()=>{
-      autoGrow(ta, ta);
       positionBeatCard(card, x, spineY, above, cardW);
       drawConnectors(b);
     });
@@ -2035,7 +2095,7 @@ function drawConnectors(b){
 }
 
 function addBeat(b, index){
-  const beat = {id:uid('bt'), actId:(b.acts[0]||{}).id, title:'', text:'', linkedBoardId:null, customW:null};
+  const beat = {id:uid('bt'), actId:(b.acts[0]||{}).id, title:'', parts:[{id:uid('pt'), label:'', text:''}], linkedBoardId:null, customW:null};
   b.beats.splice(index, 0, beat);
   scheduleSave();
   renderTimeline(b);
