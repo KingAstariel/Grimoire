@@ -1443,7 +1443,6 @@ function makeDraggable(el, elData, b){
       return;
     }
     e.preventDefault();
-    el.classList.add('dragging');
     el.setPointerCapture(e.pointerId);
     const startX=e.clientX, startY=e.clientY;
     const startL=elData.x, startT=elData.y;
@@ -1452,10 +1451,16 @@ function makeDraggable(el, elData, b){
       ? (b.elements||[]).filter(c=>c.colId===elData.id).map(c=>({data:c, x:c.x, y:c.y}))
       : [];
     let moved = false;
+    const DRAG_THRESHOLD = 6; // px of real mouse movement before a click/dblclick turns into a drag
     function onMove(ev){
-      moved = true;
-      const nx = Math.max(0, startL + (ev.clientX-startX)/zoomLevel);
-      const ny = Math.max(0, startT + (ev.clientY-startY)/zoomLevel);
+      const dxScreen = ev.clientX-startX, dyScreen = ev.clientY-startY;
+      if(!moved){
+        if(Math.hypot(dxScreen, dyScreen) < DRAG_THRESHOLD) return;
+        moved = true;
+        el.classList.add('dragging');
+      }
+      const nx = Math.max(0, startL + dxScreen/zoomLevel);
+      const ny = Math.max(0, startT + dyScreen/zoomLevel);
       const dx = nx-startL, dy = ny-startT;
       elData.x=nx; elData.y=ny;
       el.style.left=nx+'px'; el.style.top=ny+'px';
@@ -1475,11 +1480,21 @@ function makeDraggable(el, elData, b){
       if(!moved){ return; }
       if(!isColumn){
         const col = findColumnUnder(elData, b, elData.colId);
-        const newColId = col ? col.id : null;
-        if(elData.colId !== newColId){
-          removeFromAllColumnOrders(b, elData.id);
-          elData.colId = newColId;
-          if(col){ col.order = col.order || []; col.order.push(elData.id); }
+        removeFromAllColumnOrders(b, elData.id);
+        elData.colId = col ? col.id : null;
+        if(col){
+          col.order = col.order || [];
+          // insert at the vertical slot the drop point suggests, instead of
+          // always appending at the end — lets a board be dropped between two others
+          const midY = elData.y + (elData.h||100)/2;
+          let insertAt = col.order.length;
+          for(let idx=0; idx<col.order.length; idx++){
+            const sib = (b.elements||[]).find(e=>e.id===col.order[idx]);
+            if(!sib) continue;
+            const sibMid = sib.y + (sib.h||100)/2;
+            if(midY < sibMid){ insertAt = idx; break; }
+          }
+          col.order.splice(insertAt, 0, elData.id);
         }
       }
       scheduleSave();
