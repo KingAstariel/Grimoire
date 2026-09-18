@@ -169,12 +169,67 @@
     font-size:15px;
     line-height:1.4;
     border-top:6px solid var(--gold);
+    display:flex;flex-direction:column;
   }
-  .note textarea{
-    width:100%;height:calc(100% - 4px);
-    background:transparent;border:none;resize:none;
-    font-family:'EB Garamond',serif;font-size:15px;color:var(--ink);
-    outline:none;overflow-y:auto;
+
+  /* ---------- RICH TEXT EDITOR ---------- */
+  .rte-btn{
+    width:26px;height:26px;border-radius:4px;
+    border:1px solid var(--umber);background:var(--parchment-2);color:var(--ink);
+    font-size:12.5px;font-weight:700;cursor:pointer;
+    display:flex;align-items:center;justify-content:center;
+    font-family:'EB Garamond',serif;padding:0;
+  }
+  .rte-btn:hover{background:var(--gold);}
+  .rte-btn.underline-label{text-decoration:underline;}
+  .rte-btn.strike-label{text-decoration:line-through;}
+  .rte-swatch{
+    width:22px;height:22px;border-radius:50%;cursor:pointer;
+    border:1px solid rgba(0,0,0,.35);flex-shrink:0;
+  }
+  .rte-swatch-clear{
+    background:var(--ink);color:var(--text-light);
+    display:flex;align-items:center;justify-content:center;font-size:11px;
+  }
+  .rte-swatch-add{
+    background:var(--bg-panel-2);color:var(--gold-bright);
+    display:flex;align-items:center;justify-content:center;font-size:15px;
+    border:1px dashed var(--gold);cursor:pointer;
+  }
+  .rte-editor{
+    outline:none;font-family:'EB Garamond',serif;font-size:15px;color:var(--ink);
+    white-space:pre-wrap;word-break:break-word;
+  }
+  .rte-editor:empty:before{content:attr(data-placeholder);color:var(--text-muted);}
+  .rte-editor.rte-fixed{flex:1;min-height:0;overflow-y:auto;}
+  .tl-part .rte-editor{padding:2px 12px;}
+
+  #rte-console-toggle{font-size:15px !important;}
+  #rte-console{
+    display:none;
+    position:fixed;bottom:66px;right:16px;z-index:70;
+    width:250px;
+    background:var(--bg-panel);border:1px solid var(--gold);border-radius:10px;
+    padding:12px 14px;box-shadow:var(--shadow-deep);
+  }
+  #rte-console.open{display:block;}
+  .rte-console-header{
+    display:flex;justify-content:space-between;align-items:center;
+    font-family:'Cinzel',serif;color:var(--gold-bright);font-size:13.5px;
+    margin-bottom:10px;
+  }
+  .rte-console-header button{
+    background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:14px;
+  }
+  .rte-console-row{display:flex;gap:6px;margin-bottom:10px;}
+  .rte-console-label{
+    font-family:'JetBrains Mono',monospace;font-size:10.5px;color:var(--text-muted);
+    margin-bottom:5px;text-transform:uppercase;letter-spacing:.04em;
+  }
+  .rte-console-swatches{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;}
+  .rte-console-hint{
+    font-size:11.5px;color:var(--text-muted);line-height:1.4;margin:0;
+    border-top:1px solid #17301f;padding-top:9px;
   }
   .resize-handle{
     position:absolute;bottom:2px;right:2px;
@@ -489,6 +544,25 @@
     <span id="zoom-level">100%</span>
     <button id="zoom-in">+</button>
     <button id="zoom-reset">Réinitialiser</button>
+    <div class="toolbar-sep"></div>
+    <button id="rte-console-toggle" title="Mise en forme du texte">🖋️</button>
+  </div>
+  <div id="rte-console">
+    <div class="rte-console-header">
+      <span>Mise en forme</span>
+      <button id="rte-console-close" title="Fermer">✕</button>
+    </div>
+    <div class="rte-console-row">
+      <button class="rte-btn" id="rtec-bold" title="Gras">B</button>
+      <button class="rte-btn" id="rtec-italic" title="Italique"><i>I</i></button>
+      <button class="rte-btn underline-label" id="rtec-underline" title="Souligné">U</button>
+      <button class="rte-btn strike-label" id="rtec-strike" title="Barré">S</button>
+    </div>
+    <div class="rte-console-label">Surligner</div>
+    <div class="rte-console-swatches" id="rtec-hilite-swatches"></div>
+    <div class="rte-console-label">Couleur du texte</div>
+    <div class="rte-console-swatches" id="rtec-color-swatches"></div>
+    <p class="rte-console-hint">Sélectionne du texte dans une note ou une ligne du temps, puis clique un bouton ici.</p>
   </div>
 </div>
 
@@ -622,6 +696,7 @@ let arrowMode = false, pendingSource = null;
 let saveTimer = null;
 const imageCache = {};
 let zoomLevel = 1;
+let activeEditor = null, activeEditorOnInput = null, activeEditorOnGrow = null;
 let naturalW = 3000, naturalH = 2000;
 
 /* ---------------- persistence ---------------- */
@@ -630,6 +705,7 @@ function defaultState(){
   return {
     nextId: 1,
     currentId: 'root',
+    customColors: [],
     boards: {
       root: {
         id:'root', name:'Grimoire', icon:'📖', parentId:null, type:'canvas',
@@ -651,6 +727,7 @@ async function load(){
     state = defaultState();
   }
   if(!state.boards[state.currentId]) state.currentId = 'root';
+  if(!state.customColors) state.customColors = [];
 }
 
 function scheduleSave(){
@@ -900,6 +977,7 @@ async function importBackup(file){
     }
     state = bundle.state;
     if(!state.boards[state.currentId]) state.currentId = 'root';
+    if(!state.customColors) state.customColors = [];
     try{ await storage.set('worldboard-state', JSON.stringify(state), false); }catch(e){}
     renderBoard();
     alert('Sauvegarde importée avec succès.');
@@ -1137,6 +1215,28 @@ function escapeHtml(s){
   return (s||'').replace(/[&<>"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 }
 
+function migrateTextToHTML(v){
+  if(!v) return '';
+  if(v.indexOf('<')!==-1) return v; // already rich HTML from a previous edit
+  return escapeHtml(v).replace(/\n/g,'<br>');
+}
+
+// Builds a small rich-text editor: a toolbar (bold/underline/strike/highlight/color)
+// plus a contenteditable area. opts:
+//   initialHTML, placeholder, onInput(html), fixed (bool: fills parent height with
+//   internal scroll, vs. flowing/growing naturally with its content).
+function createRTE(opts){
+  const editor = document.createElement('div');
+  editor.className = 'rte-editor' + (opts.fixed ? ' rte-fixed' : '');
+  editor.contentEditable = 'true';
+  editor.setAttribute('data-placeholder', opts.placeholder||'');
+  editor.innerHTML = migrateTextToHTML(opts.initialHTML);
+  editor.addEventListener('pointerdown', e=>e.stopPropagation());
+  editor.addEventListener('input', ()=>{ opts.onInput(editor.innerHTML); if(opts.onGrow) opts.onGrow(); });
+  editor.addEventListener('focus', ()=>{ activeEditor = editor; activeEditorOnInput = opts.onInput; activeEditorOnGrow = opts.onGrow; });
+  return editor;
+}
+
 function buildElementNode(elData, b){
   const el = document.createElement('div');
   el.className = 'elm';
@@ -1155,15 +1255,13 @@ function buildElementNode(elData, b){
     el.style.background = elData.color || '#f3e6b0';
     el.style.borderTopColor = elData.color || '#D5AC4E';
     if(!elData.h) elData.h = 160;
-    const ta = document.createElement('textarea');
-    ta.value = elData.text||'';
-    ta.placeholder='Écris ici…';
-    ta.addEventListener('pointerdown', e=>e.stopPropagation());
-    ta.addEventListener('input', ()=>{
-      elData.text = ta.value;
-      scheduleSave();
+    const rte = createRTE({
+      initialHTML: elData.text||'',
+      placeholder: 'Écris ici…',
+      fixed: true,
+      onInput: (html)=>{ elData.text = html; scheduleSave(); }
     });
-    el.appendChild(ta);
+    el.appendChild(rte);
 
     const colorBtn = mkBtn('🎨', ()=>openColorPopover(elData, el));
     const delBtn = mkBtn('🗑', ()=>{ if(confirm('Supprimer cette note ?')){ removeElement(b, elData.id); } });
@@ -1966,19 +2064,15 @@ function renderTimeline(b){
         labelRow.appendChild(delPartBtn);
       }
       partEl.appendChild(labelRow);
-      const partTa = document.createElement('textarea');
-      partTa.value = part.text||'';
-      partTa.placeholder = 'Résumé des événements…';
-      partTa.addEventListener('input', ()=>{
-        part.text = partTa.value;
-        autoGrow(partTa, partTa);
-        scheduleSave();
-        positionBeatCard(card, x, spineY, above, cardW);
-        drawConnectors(b);
+      const partRte = createRTE({
+        initialHTML: part.text||'',
+        placeholder: 'Résumé des événements…',
+        fixed: false,
+        onInput: (html)=>{ part.text = html; scheduleSave(); },
+        onGrow: ()=>{ positionBeatCard(card, x, spineY, above, cardW); drawConnectors(b); }
       });
-      partEl.appendChild(partTa);
+      partEl.appendChild(partRte);
       partsWrap.appendChild(partEl);
-      requestAnimationFrame(()=>autoGrow(partTa, partTa));
     });
     const addPartBtn = document.createElement('button');
     addPartBtn.className='tl-addlink-btn'; addPartBtn.textContent='+ Ajouter une partie';
@@ -2174,7 +2268,7 @@ function openActsModal(){
       <div style="margin-top:12px;">
         <label>Nouvel acte</label>
         <input type="text" id="m-new-act-name" placeholder="Nom de l'acte">
-        ${swatchesHTML(null,'newact')}
+        ${swatchesHTML(b.acts.length ? b.acts[b.acts.length-1].color : null,'newact')}
         <button class="tool" id="m-add-act" style="margin-top:8px;">+ Ajouter l'acte</button>
       </div>
       <div id="modal-actions"><button id="m-cancel">Fermer</button></div>
@@ -2200,7 +2294,8 @@ function openActsModal(){
     document.getElementById('m-cancel').onclick = ()=>{ closeModal(); renderTimeline(b); };
     document.getElementById('m-add-act').onclick = ()=>{
       const name = document.getElementById('m-new-act-name').value.trim() || 'Nouvel acte';
-      const color = selectedColor(modalBox,'newact', '#D5AC4E');
+      const lastColor = b.acts.length ? b.acts[b.acts.length-1].color : '#D5AC4E';
+      const color = selectedColor(modalBox,'newact', lastColor);
       b.acts.push({id:uid('act'), name, color});
       scheduleSave(); draw();
     };
@@ -2223,6 +2318,96 @@ async function init(){
     }
   });
 }
+
+/* ---------------- central formatting console ---------------- */
+
+function applyRteCommand(cmd, value){
+  if(!activeEditor) return;
+  activeEditor.focus();
+  document.execCommand(cmd, false, value===undefined?null:value);
+  if(activeEditorOnInput) activeEditorOnInput(activeEditor.innerHTML);
+  if(activeEditorOnGrow) activeEditorOnGrow();
+}
+
+function renderConsoleSwatches(containerId, command){
+  if(!state) return;
+  const el = document.getElementById(containerId);
+  el.innerHTML = '';
+
+  COLORS.forEach(c=>{
+    const sw = document.createElement('div');
+    sw.className='rte-swatch'; sw.style.background=c.hex; sw.title=c.name;
+    sw.addEventListener('mousedown', e=>e.preventDefault());
+    sw.addEventListener('click', ()=>applyRteCommand(command, c.hex));
+    el.appendChild(sw);
+  });
+
+  (state.customColors||[]).forEach(hex=>{
+    const sw = document.createElement('div');
+    sw.className='rte-swatch'; sw.style.background=hex; sw.title=hex+' (clic droit pour retirer)';
+    sw.addEventListener('mousedown', e=>e.preventDefault());
+    sw.addEventListener('click', ()=>applyRteCommand(command, hex));
+    sw.addEventListener('contextmenu', e=>{
+      e.preventDefault();
+      if(confirm('Retirer cette couleur de la palette ?')){
+        state.customColors = state.customColors.filter(h=>h!==hex);
+        scheduleSave();
+        renderConsoleSwatches('rtec-hilite-swatches','hiliteColor');
+        renderConsoleSwatches('rtec-color-swatches','foreColor');
+      }
+    });
+    el.appendChild(sw);
+  });
+
+  const clearSw = document.createElement('div');
+  clearSw.className='rte-swatch rte-swatch-clear'; clearSw.title='Retirer la mise en forme de couleur'; clearSw.textContent='✕';
+  clearSw.addEventListener('mousedown', e=>e.preventDefault());
+  clearSw.addEventListener('click', ()=>{
+    if(command==='hiliteColor') applyRteCommand('hiliteColor', 'transparent');
+    else applyRteCommand('foreColor', '#000000');
+  });
+  el.appendChild(clearSw);
+
+  const addLabel = document.createElement('label');
+  addLabel.className='rte-swatch rte-swatch-add'; addLabel.title='Ajouter une couleur à la palette';
+  addLabel.textContent = '+';
+  const colorInput = document.createElement('input');
+  colorInput.type='color'; colorInput.style.cssText='position:absolute;opacity:0;width:0;height:0;';
+  colorInput.addEventListener('input', ()=>{
+    const hex = colorInput.value;
+    if(!state.customColors) state.customColors = [];
+    if(!state.customColors.includes(hex)){
+      state.customColors.push(hex);
+      scheduleSave();
+    }
+    renderConsoleSwatches('rtec-hilite-swatches','hiliteColor');
+    renderConsoleSwatches('rtec-color-swatches','foreColor');
+  });
+  addLabel.appendChild(colorInput);
+  el.appendChild(addLabel);
+}
+
+function refreshConsoleSwatches(){
+  renderConsoleSwatches('rtec-hilite-swatches','hiliteColor');
+  renderConsoleSwatches('rtec-color-swatches','foreColor');
+}
+
+function wireFormattingConsole(){
+  const toggle = document.getElementById('rte-console-toggle');
+  const consoleEl = document.getElementById('rte-console');
+  toggle.addEventListener('click', ()=>{
+    consoleEl.classList.toggle('open');
+    if(consoleEl.classList.contains('open')) refreshConsoleSwatches();
+  });
+  document.getElementById('rte-console-close').addEventListener('click', ()=>consoleEl.classList.remove('open'));
+
+  [['rtec-bold','bold'], ['rtec-italic','italic'], ['rtec-underline','underline'], ['rtec-strike','strikeThrough']].forEach(([id,cmd])=>{
+    const btn = document.getElementById(id);
+    btn.addEventListener('mousedown', e=>e.preventDefault());
+    btn.addEventListener('click', ()=>applyRteCommand(cmd));
+  });
+}
+wireFormattingConsole();
 
 function startApp(){
   if(firestoreDb && typeof firebase.auth === 'function'){
