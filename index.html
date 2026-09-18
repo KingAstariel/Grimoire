@@ -1096,10 +1096,12 @@ function renderToolbar(){
       <button class="tool" id="t-parent" ${!b.parentId?'disabled':''}>⬆ Remonter</button>
       <div class="toolbar-sep"></div>
       <button class="tool" id="t-acts">🎨 Gérer les actes</button>
+      <button class="tool" id="t-note">🗒 Note</button>
       <div class="toolbar-sep"></div>
       <span style="font-size:12px;color:var(--text-muted);font-family:'JetBrains Mono',monospace;">Ligne du temps · ${(b.beats||[]).length} étape(s)</span>
     `;
     document.getElementById('t-acts').onclick = openActsModal;
+    document.getElementById('t-note').onclick = ()=>addNote();
   } else {
     tb.innerHTML = `
       <button class="tool" id="t-parent" ${!b.parentId?'disabled':''}>⬆ Remonter</button>
@@ -1138,12 +1140,7 @@ function toggleArrowMode(){
 function renderBoard(){
   renderBreadcrumb();
   renderToolbar();
-  const b = board();
-  if(b.type==='timeline'){
-    renderTimeline(b);
-  } else {
-    renderCanvas(b);
-  }
+  renderBoardContent(board());
 }
 
 /* ==================================================================
@@ -1485,7 +1482,7 @@ function makeDraggable(el, elData, b){
         }
       }
       scheduleSave();
-      renderCanvas(b);
+      renderBoardContent(b);
     }
     document.addEventListener('pointermove', onMove);
     document.addEventListener('pointerup', onUp);
@@ -1527,9 +1524,9 @@ function removeElement(b, id, isImage){
       (b.elements||[]).forEach(e=>{ if(e.colId===id) e.colId=null; });
     }
   }
-  b.arrows = (b.arrows||[]).filter(a=>a.fromId!==id && a.toId!==id);
+  if(b.arrows) b.arrows = b.arrows.filter(a=>a.fromId!==id && a.toId!==id);
   scheduleSave();
-  renderCanvas(b);
+  renderBoardContent(b);
 }
 
 /* ---------------- add element actions ---------------- */
@@ -1539,14 +1536,19 @@ function viewportCenter(){
   return { x: wrap.scrollLeft/zoomLevel + 140, y: wrap.scrollTop/zoomLevel + 100 };
 }
 
+function renderBoardContent(b){
+  if(b.type==='timeline') renderTimeline(b); else renderCanvas(b);
+}
+
 function addNote(){
   const b = board();
+  if(!b.elements) b.elements = [];
   const pos = viewportCenter();
   const elData = {id:uid('e'), type:'note', x:pos.x, y:pos.y, w:230, h:160, color:'#D5AC4E', text:''};
   b.elements.push(elData);
   scheduleSave();
-  renderCanvas(b);
-  const node = document.querySelector('.elm[data-id="'+elData.id+'"] textarea');
+  renderBoardContent(b);
+  const node = document.querySelector('.elm[data-id="'+elData.id+'"] .rte-editor');
   if(node) node.focus();
 }
 
@@ -1643,7 +1645,7 @@ function openBoardLinkModal(){
       const icon = selectedIcon(modalBox, '📖');
       targetId = uid('b');
       state.boards[targetId] = { id:targetId, name, icon, iconImgData: holder.imgData, parentId: state.currentId, type,
-        elements: type==='canvas'? [] : undefined,
+        elements: [],
         arrows: type==='canvas'? [] : undefined,
         acts: type==='timeline'? defaultActs() : undefined,
         beats: type==='timeline'? [] : undefined };
@@ -1776,6 +1778,7 @@ function edgePoint(bbox, towardX, towardY){
 }
 
 function drawArrows(b){
+  if(b.type==='timeline') return; // the timeline's own spine/connectors share this SVG layer and don't support arrows
   const svg = document.getElementById('arrow-layer');
   if(!svg) return;
   svg.innerHTML = '<defs></defs>';
@@ -1940,6 +1943,7 @@ function renderTimeline(b){
   const canvas = document.getElementById('canvas');
   if(!b.acts) b.acts = defaultActs();
   if(!b.beats) b.beats = [];
+  if(!b.elements) b.elements = [];
   if(!b.spineY) b.spineY = 560;
   const spineY = b.spineY;
   const positions = computeBeatPositions(b);
@@ -2153,6 +2157,12 @@ function renderTimeline(b){
     addBeatBtn.addEventListener('click', ()=>addBeat(b, 0));
     canvas.appendChild(addBeatBtn);
   }
+
+  // free-floating notes, placed over the timeline canvas like on canvas boards
+  (b.elements||[]).filter(e=>e.type==='note').forEach(elData=>{
+    const node = buildElementNode(elData, b);
+    canvas.appendChild(node);
+  });
 
   applyZoom();
 }
