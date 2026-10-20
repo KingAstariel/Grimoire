@@ -147,6 +147,8 @@
     user-select:none;
   }
   .elm.dragging{cursor:grabbing;opacity:.9;z-index:50;}
+  .elm.selected{outline:2px solid #007A48;outline-offset:2px;}
+  .elm.boardlink-target{outline:2px dashed #D5AC4E;outline-offset:3px;}
   .elm .elm-toolbar{
     position:absolute;top:-14px;right:2px;
     display:none;gap:3px;
@@ -414,6 +416,15 @@
     background:var(--ink);color:var(--gold-bright);cursor:pointer;font-size:16px;
   }
   #zoom-controls button:hover{border-color:var(--gold);}
+  #zoom-controls button.tool-mode.active{border-color:var(--gold-bright);background:var(--forest);}
+  #canvas-wrapper.pan-mode, #canvas-wrapper.pan-mode #canvas{cursor:grab;}
+  #canvas-wrapper.panning, #canvas-wrapper.panning *{cursor:grabbing !important;}
+  .marquee{position:fixed;z-index:70;pointer-events:none;border:1px dashed #D5AC4E;background:rgba(213,172,78,.12);}
+  .arrow-label.dot{
+    width:16px;height:16px;padding:0;border-radius:50%;box-sizing:border-box;
+    border:2px solid #000;box-shadow:0 0 0 1.5px #fff;opacity:0;transition:opacity .12s;cursor:grab;
+  }
+  .arrow-label.dot.show-dot{opacity:1;}
   #zoom-level{
     font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-muted);
     width:42px;text-align:center;
@@ -476,9 +487,9 @@
   }
   .swatches{display:flex;gap:8px;margin-top:4px;flex-wrap:wrap;}
   .swatch{
-    width:26px;height:26px;border-radius:50%;cursor:pointer;border:2px solid transparent;
+    width:26px;height:26px;border-radius:50%;cursor:pointer;border:2px solid #000;
   }
-  .swatch.sel{border-color:#fff;}
+  .swatch.sel{border-color:#000;box-shadow:0 0 0 2px #fff;}
   .icon-scroll{max-height:280px;overflow-y:auto;margin-top:4px;padding-right:4px;}
   .icon-cat-label{
     font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:.05em;
@@ -546,6 +557,9 @@
     <button id="zoom-reset">Réinitialiser</button>
     <div class="toolbar-sep"></div>
     <button id="rte-console-toggle" title="Mise en forme du texte">🖋️</button>
+    <div class="toolbar-sep"></div>
+    <button id="tool-select" class="tool-mode active" title="Curseur : sélectionner et déplacer les éléments">↖</button>
+    <button id="tool-pan" class="tool-mode" title="Main : glisser pour déplacer la vue">✋</button>
   </div>
   <div id="rte-console">
     <div class="rte-console-header">
@@ -596,6 +610,7 @@ const COLORS = [
   {name:'Forêt',     hex:'#035732'},
   {name:'Bronze',    hex:'#8B7138'},
   {name:'Encre',     hex:'#0f2b1c'},
+  {name:'Rouge',     hex:'#B3261E'},
 ];
 const ICON_CATEGORIES = [
   { label:"Émotions", icons:["😀","😃","😄","😁","😆","😅","🤣","😂","🙂","🙃","🫠","😉","😊","😇","🥰","😍","🤩","😘","😗","☺️","😚","😙","🥲","😋","😛","😜","🤪","😝","🤑","🤗","🤭","🫢","🫣","🤫","🤔","🫡","🤐","🤨","😐","😑","😶","🫥","😶‍🌫️","😏","😒","🙄","😬","😮‍💨","🤥","🫨","🙂‍↔️","🙂‍↕️","😌","😔","😪","🤤","😴","🫩","😷","🤒","🤕","🤢","🤮","🤧","🥵","🥶","🥴","😵","😵‍💫","🤯","🤠","🥳","🥸","😎","🤓","🧐","😕","🫤","😟","🙁","☹️","😮","😯","😲","😳","🫪","🥺","🥹","😦","😧","😨","😰","😥","😢","😭","😱","😖","😣","😞","😓","😩","😫","🥱","😤","😡","😠","🤬","😈","👿","💀","☠️","💩","🤡","👹","👺","👻","👽","👾","🤖","😺","😸","😹","😻","😼","😽","🙀","😿","😾","🙈","🙉","🙊","💌","💘","💝","💖","💗","💓","💞","💕","💟","❣️","💔","❤️‍🔥","❤️‍🩹","❤️","🩷","🧡","💛","💚","💙","🩵","💜","🤎","🖤","🩶","🤍","💋","💯","💢","🫯","💥","💫","💦","💨","🕳️","💬","👁️‍🗨️","🗨️","🗯️","💭","💤"] },
@@ -699,6 +714,11 @@ const imageCache = {};
 let zoomLevel = 1;
 let activeEditor = null, activeEditorOnInput = null, activeEditorOnGrow = null;
 let naturalW = 3000, naturalH = 2000;
+let panMode = false; // true = hand tool: dragging pans the view instead of moving elements
+let selectedIds = new Set(); // ids of the selected elements (one or many) on selectedBoardId
+let selectedBoardId = null;
+let elementClipboard = null; // array of deep-cloned elements with their layout relative to each other
+let arrowDragId = null; // arrow whose curve handle is being dragged
 
 /* ---------------- persistence ---------------- */
 
@@ -871,12 +891,29 @@ function wireCustomIconRow(root, holder){
     };
     const clearBtn = row.querySelector('#m-icon-clear');
     if(clearBtn) clearBtn.onclick = ()=>{ holder.imgData=null; redraw(); };
+    const paste = row.querySelector('#m-icon-paste');
+    if(paste) paste.addEventListener('input', ()=>{
+      const v = paste.value.trim();
+      if(!v) return;
+      const g = (window.Intl && Intl.Segmenter)
+        ? [...new Intl.Segmenter(undefined,{granularity:'grapheme'}).segment(v)][0].segment
+        : Array.from(v)[0];
+      root.querySelectorAll('.icon-opt').forEach(o=>o.classList.remove('sel'));
+      let prev = row.querySelector('.icon-opt.pasted');
+      if(!prev){ prev = document.createElement('div'); row.appendChild(prev); }
+      prev.className = 'icon-opt pasted sel';
+      prev.dataset.icon = g; prev.textContent = g;
+      holder.imgData = null;
+      const img = row.querySelector('img'); if(img) img.remove();
+      const clr = row.querySelector('#m-icon-clear'); if(clr) clr.remove();
+    });
   }
   function redraw(){
     const row = root.querySelector('#m-icon-custom-row');
     if(!row) return;
     row.innerHTML = '<input type="file" id="m-icon-file" accept="image/*" style="display:none;">' +
       '<button type="button" class="tool" id="m-icon-upload">🖼️ Image perso.</button>' +
+      '<input type="text" id="m-icon-paste" placeholder="Coller un emoji…" style="width:140px;">' +
       (holder.imgData ? '<img src="'+holder.imgData+'" style="width:30px;height:30px;border-radius:50%;object-fit:cover;border:1px solid var(--gold);"><button type="button" class="tool" id="m-icon-clear">Retirer</button>' : '');
     bindRowButtons();
   }
@@ -1127,6 +1164,7 @@ function renderToolbar(){
 
 function toggleArrowMode(){
   arrowMode = !arrowMode;
+  if(arrowMode && panMode) setPanMode(false);
   pendingSource = null;
   document.getElementById('t-arrow').classList.toggle('active', arrowMode);
   document.querySelectorAll('.elm').forEach(e=>e.style.outline='');
@@ -1139,6 +1177,7 @@ function toggleArrowMode(){
    ================================================================== */
 
 function renderBoard(){
+  deselectElement();
   renderBreadcrumb();
   renderToolbar();
   renderBoardContent(board());
@@ -1415,15 +1454,56 @@ function addResizeHandle(el, elData, opts){
   el.appendChild(handle);
 }
 
-function findColumnUnder(elData, b, excludeId){
+function findColumnUnder(elData, b, exclude){
   const cx = elData.x + elData.w/2;
   const cy = elData.y + (elData.h||100)/2;
-  const cols = (b.elements||[]).filter(e=>e.type==='column' && e.id!==excludeId);
+  const ex = exclude instanceof Set ? exclude : new Set(exclude ? [exclude] : []);
+  const cols = (b.elements||[]).filter(e=>e.type==='column' && !ex.has(e.id));
   for(const col of cols){
     const h = col.computedH || col.h || 340;
     if(cx>=col.x && cx<=col.x+col.w && cy>=col.y && cy<=col.y+h) return col;
   }
   return null;
+}
+
+function findBoardLinkUnder(elData, b, excludeId){
+  const cx = elData.x + elData.w/2;
+  const cy = elData.y + (elData.h||100)/2;
+  const links = (b.elements||[]).filter(e=>e.type==='boardlink' && e.id!==excludeId && state.boards[e.targetId]);
+  for(const link of links){
+    const w = link.w||130, h = link.h||110;
+    if(cx>=link.x && cx<=link.x+w && cy>=link.y && cy<=link.y+h) return link;
+  }
+  return null;
+}
+
+// Moves the given elements (plus the children of any column among them) out of board b
+// and into targetBoard, keeping their layout relative to each other but repositioned
+// near the top-left of the target.
+function moveElementsToBoard(b, targetBoard, roots, primary){
+  if(!targetBoard.elements) targetBoard.elements = [];
+  const rootIds = new Set(roots.map(r=>r.id));
+  const moving = [...roots];
+  roots.forEach(r=>{
+    if(r.type==='column'){
+      (b.elements||[]).filter(e=>e.colId===r.id && !rootIds.has(e.id)).forEach(c=>moving.push(c));
+    }
+  });
+  const movingIds = new Set(moving.map(m=>m.id));
+  // columns that stay behind forget the elements that left
+  (b.elements||[]).filter(e=>e.type==='column' && !movingIds.has(e.id)).forEach(col=>{
+    if(col.order) col.order = col.order.filter(id=>!movingIds.has(id));
+  });
+  if(b.arrows) b.arrows = b.arrows.filter(a=>!movingIds.has(a.fromId) && !movingIds.has(a.toId));
+  const ox = primary.x, oy = primary.y, destX = 60, destY = 60;
+  moving.forEach(m=>{
+    const i = b.elements.indexOf(m);
+    if(i>=0) b.elements.splice(i,1);
+    m.x = destX + (m.x-ox);
+    m.y = destY + (m.y-oy);
+    if(m.colId && !movingIds.has(m.colId)) m.colId = null; // its column didn't come along
+    targetBoard.elements.push(m);
+  });
 }
 
 function removeFromAllColumnOrders(b, elId){
@@ -1435,6 +1515,25 @@ function removeFromAllColumnOrders(b, elId){
   });
 }
 
+// Snap a dropped element into the column under it (or free it), inserting it at the
+// vertical slot where it was dropped so it can land between two others.
+function snapIntoColumnUnder(b, elData, movingIds){
+  const col = findColumnUnder(elData, b, movingIds);
+  removeFromAllColumnOrders(b, elData.id);
+  elData.colId = col ? col.id : null;
+  if(!col) return;
+  col.order = col.order || [];
+  const midY = elData.y + (elData.h||100)/2;
+  let insertAt = col.order.length;
+  for(let idx=0; idx<col.order.length; idx++){
+    const sib = (b.elements||[]).find(e=>e.id===col.order[idx]);
+    if(!sib) continue;
+    const sibMid = sib.y + (sib.h||100)/2;
+    if(midY < sibMid){ insertAt = idx; break; }
+  }
+  col.order.splice(insertAt, 0, elData.id);
+}
+
 function makeDraggable(el, elData, b){
   el.addEventListener('pointerdown', (e)=>{
     if(arrowMode) return;
@@ -1442,15 +1541,40 @@ function makeDraggable(el, elData, b){
     if(e.target.tagName==='TEXTAREA' || e.target.tagName==='INPUT'){
       return;
     }
+    // clicking anything else should properly hand off focus/caret away from
+    // whichever note was being edited — preventDefault() below otherwise blocks
+    // the browser's normal blur-on-click behavior and the caret stays stuck there
+    blurActiveEditor();
     e.preventDefault();
     el.setPointerCapture(e.pointerId);
+    const additive = e.shiftKey || e.ctrlKey || e.metaKey;
+    const wasSelected = selectedIds.has(elData.id) && selectedBoardId===b.id;
+    if(selectedBoardId!==b.id){ selectedIds = new Set(); selectedBoardId = b.id; }
+    if(!wasSelected){
+      if(!additive) selectedIds = new Set();
+      selectedIds.add(elData.id);
+      applySelectionVisuals();
+    }
     const startX=e.clientX, startY=e.clientY;
-    const startL=elData.x, startT=elData.y;
-    const isColumn = elData.type==='column';
-    const childrenStart = isColumn
-      ? (b.elements||[]).filter(c=>c.colId===elData.id).map(c=>({data:c, x:c.x, y:c.y}))
-      : [];
+
+    // everything that moves with this drag: the whole selection, plus the children of
+    // any selected column
+    const roots = [...selectedIds].map(id=>(b.elements||[]).find(x=>x.id===id)).filter(Boolean);
+    const rootIds = new Set(roots.map(r=>r.id));
+    const group = new Map();
+    roots.forEach(r=>{
+      group.set(r.id, {data:r, x:r.x, y:r.y});
+      if(r.type==='column'){
+        (b.elements||[]).filter(c=>c.colId===r.id).forEach(c=>{
+          if(!group.has(c.id)) group.set(c.id, {data:c, x:c.x, y:c.y});
+        });
+      }
+    });
+    const minStartX = Math.min(...[...group.values()].map(g=>g.x));
+    const minStartY = Math.min(...[...group.values()].map(g=>g.y));
+    const canDropIntoBoard = roots.every(r=>r.type!=='boardlink');
     let moved = false;
+    let hoverLinkNode = null;
     const DRAG_THRESHOLD = 6; // px of real mouse movement before a click/dblclick turns into a drag
     function onMove(ev){
       const dxScreen = ev.clientX-startX, dyScreen = ev.clientY-startY;
@@ -1459,44 +1583,47 @@ function makeDraggable(el, elData, b){
         moved = true;
         el.classList.add('dragging');
       }
-      const nx = Math.max(0, startL + dxScreen/zoomLevel);
-      const ny = Math.max(0, startT + dyScreen/zoomLevel);
-      const dx = nx-startL, dy = ny-startT;
-      elData.x=nx; elData.y=ny;
-      el.style.left=nx+'px'; el.style.top=ny+'px';
-      if(isColumn){
-        childrenStart.forEach(cs=>{
-          cs.data.x = cs.x+dx; cs.data.y = cs.y+dy;
-          const node = document.querySelector('.elm[data-id="'+cs.data.id+'"]');
-          if(node){ node.style.left=cs.data.x+'px'; node.style.top=cs.data.y+'px'; }
-        });
+      const dx = Math.max(dxScreen/zoomLevel, -minStartX);
+      const dy = Math.max(dyScreen/zoomLevel, -minStartY);
+      group.forEach(g=>{
+        g.data.x = g.x+dx; g.data.y = g.y+dy;
+        const node = g.data===elData ? el : document.querySelector('.elm[data-id="'+g.data.id+'"]');
+        if(node){ node.style.left=g.data.x+'px'; node.style.top=g.data.y+'px'; }
+      });
+      if(canDropIntoBoard){
+        const link = findBoardLinkUnder(elData, b, null);
+        const linkEl = link ? document.querySelector('.elm[data-id="'+link.id+'"]') : null;
+        if(hoverLinkNode && hoverLinkNode!==linkEl) hoverLinkNode.classList.remove('boardlink-target');
+        if(linkEl) linkEl.classList.add('boardlink-target');
+        hoverLinkNode = linkEl;
       }
       drawArrows(b);
     }
     function onUp(ev){
       el.classList.remove('dragging');
+      if(hoverLinkNode) hoverLinkNode.classList.remove('boardlink-target');
       document.removeEventListener('pointermove', onMove);
       document.removeEventListener('pointerup', onUp);
-      if(!moved){ return; }
-      if(!isColumn){
-        const col = findColumnUnder(elData, b, elData.colId);
-        removeFromAllColumnOrders(b, elData.id);
-        elData.colId = col ? col.id : null;
-        if(col){
-          col.order = col.order || [];
-          // insert at the vertical slot the drop point suggests, instead of
-          // always appending at the end — lets a board be dropped between two others
-          const midY = elData.y + (elData.h||100)/2;
-          let insertAt = col.order.length;
-          for(let idx=0; idx<col.order.length; idx++){
-            const sib = (b.elements||[]).find(e=>e.id===col.order[idx]);
-            if(!sib) continue;
-            const sibMid = sib.y + (sib.h||100)/2;
-            if(midY < sibMid){ insertAt = idx; break; }
-          }
-          col.order.splice(insertAt, 0, elData.id);
+      if(!moved){
+        if(additive && wasSelected){ selectedIds.delete(elData.id); }
+        else if(!additive){ selectedIds = new Set([elData.id]); }
+        applySelectionVisuals();
+        return;
+      }
+      if(canDropIntoBoard){
+        const link = findBoardLinkUnder(elData, b, null);
+        if(link){
+          moveElementsToBoard(b, state.boards[link.targetId], roots, elData);
+          deselectElement();
+          scheduleSave();
+          renderBoardContent(b);
+          return;
         }
       }
+      // loose elements (not travelling inside a moved column) snap into / out of columns
+      roots.filter(r=>r.type!=='column' && !(r.colId && rootIds.has(r.colId)))
+           .sort((a,b2)=>a.y-b2.y)
+           .forEach(r=>snapIntoColumnUnder(b, r, rootIds));
       scheduleSave();
       renderBoardContent(b);
     }
@@ -1554,6 +1681,11 @@ function viewportCenter(){
 
 function renderBoardContent(b){
   if(b.type==='timeline') renderTimeline(b); else renderCanvas(b);
+  if(selectedBoardId===b.id){
+    const ids = new Set((b.elements||[]).map(e=>e.id));
+    selectedIds = new Set([...selectedIds].filter(id=>ids.has(id)));
+  }
+  applySelectionVisuals();
 }
 
 function addNote(){
@@ -1793,6 +1925,16 @@ function edgePoint(bbox, towardX, towardY){
   return {x:cx+dx*scale, y:cy+dy*scale};
 }
 
+// Offset of the curve's control point from the midpoint of the chord (free in x and y).
+// Older arrows only stored a perpendicular "bend"; those are converted on the fly.
+function arrowCurveOffset(arr, p1, p2){
+  if(arr.ctrl && typeof arr.ctrl.x==='number') return arr.ctrl;
+  const dx=p2.x-p1.x, dy=p2.y-p1.y;
+  const len=Math.hypot(dx,dy)||1;
+  const bend = (typeof arr.bend==='number') ? arr.bend : Math.min(60, len*0.25);
+  return {x:(-dy/len)*bend, y:(dx/len)*bend};
+}
+
 function drawArrows(b){
   if(b.type==='timeline') return; // the timeline's own spine/connectors share this SVG layer and don't support arrows
   const svg = document.getElementById('arrow-layer');
@@ -1827,8 +1969,8 @@ function drawArrows(b){
       const dx=p2.x-p1.x, dy=p2.y-p1.y;
       const len=Math.hypot(dx,dy)||1;
       const nx=-dy/len, ny=dx/len;
-      const bend = Math.min(60, len*0.25);
-      const cx=mx+nx*bend, cy=my+ny*bend;
+      const off = arrowCurveOffset(arr, p1, p2);
+      const cx=mx+off.x, cy=my+off.y;
       d = 'M'+p1.x+','+p1.y+' Q'+cx+','+cy+' '+p2.x+','+p2.y;
       midX = 0.25*p1.x+0.5*cx+0.25*p2.x;
       midY = 0.25*p1.y+0.5*cy+0.25*p2.y;
@@ -1847,25 +1989,77 @@ function drawArrows(b){
     if(markerStartAttr) path.setAttribute('marker-start', markerStartAttr.match(/url\([^)]+\)/)[0]);
     svg.appendChild(path);
 
-    if(arr.label){
+    // wide invisible stroke so the whole arrow is clickable, not just its midpoint
+    const hit = document.createElementNS('http://www.w3.org/2000/svg','path');
+    hit.setAttribute('d', d);
+    hit.setAttribute('stroke','transparent');
+    hit.setAttribute('stroke-width','18');
+    hit.setAttribute('fill','none');
+    hit.style.pointerEvents = 'stroke';
+    hit.style.cursor = 'pointer';
+    hit.addEventListener('click', ()=>{ if(!arrowMode) editOrDeleteArrow(b, arr.id); });
+    svg.appendChild(hit);
+
+    // midpoint chip: shows the label if any; on curved arrows it is also the handle
+    // used to drag the curve in any direction (a small dot appears on hover)
+    if(arr.label || arr.curved){
       const chip = document.createElement('div');
       chip.className='arrow-label';
       chip.style.left=midX+'px'; chip.style.top=midY+'px';
-      chip.style.background=arr.color;
-      chip.textContent=arr.label;
-      chip.addEventListener('click', ()=>editOrDeleteArrow(b, arr.id));
-      canvas.appendChild(chip);
-    } else {
-      // still allow click to edit near midpoint via invisible small chip
-      const chip = document.createElement('div');
-      chip.className='arrow-label';
-      chip.style.left=midX+'px'; chip.style.top=midY+'px';
-      chip.style.background='transparent';
-      chip.style.boxShadow='none';
-      chip.style.width='14px'; chip.style.height='14px'; chip.textContent='';
-      chip.addEventListener('click', ()=>editOrDeleteArrow(b, arr.id));
+      if(arr.label){
+        chip.style.background=arr.color;
+        chip.textContent=arr.label;
+      } else {
+        chip.classList.add('dot');
+        chip.style.background=arr.color;
+        if(arrowDragId===arr.id) chip.classList.add('show-dot');
+        let hideTimer = null;
+        const showDot = ()=>{ clearTimeout(hideTimer); chip.classList.add('show-dot'); };
+        const hideDot = ()=>{ hideTimer = setTimeout(()=>{ if(arrowDragId!==arr.id) chip.classList.remove('show-dot'); }, 120); };
+        hit.addEventListener('mouseenter', showDot);
+        hit.addEventListener('mouseleave', hideDot);
+        chip.addEventListener('mouseenter', showDot);
+        chip.addEventListener('mouseleave', hideDot);
+      }
+      if(arr.curved){
+        chip.style.cursor='grab';
+        attachArrowChipDrag(chip, b, arr, p1, p2);
+      } else {
+        chip.addEventListener('click', ()=>{ if(!arrowMode) editOrDeleteArrow(b, arr.id); });
+      }
       canvas.appendChild(chip);
     }
+  });
+}
+
+function attachArrowChipDrag(chip, b, arr, p1, p2){
+  chip.addEventListener('pointerdown', (e)=>{
+    if(arrowMode) return;
+    e.preventDefault(); e.stopPropagation();
+    const sx=e.clientX, sy=e.clientY;
+    let moved=false;
+    const canvas = document.getElementById('canvas');
+    const mx=(p1.x+p2.x)/2, my=(p1.y+p2.y)/2;
+    function onMove(ev){
+      if(!moved && Math.hypot(ev.clientX-sx, ev.clientY-sy)<5) return;
+      moved=true;
+      const r = canvas.getBoundingClientRect();
+      const px=(ev.clientX-r.left)/zoomLevel, py=(ev.clientY-r.top)/zoomLevel;
+      // the curve's midpoint sits halfway to the control point, hence the factor 2
+      arr.ctrl = {x: 2*(px-mx), y: 2*(py-my)};
+      delete arr.bend;
+      arrowDragId = arr.id;
+      drawArrows(b);
+    }
+    function onUp(){
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onUp);
+      arrowDragId = null;
+      if(moved){ scheduleSave(); drawArrows(b); }
+      else { editOrDeleteArrow(b, arr.id); }
+    }
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', onUp);
   });
 }
 
@@ -2336,13 +2530,218 @@ function openActsModal(){
 async function init(){
   await load();
   renderBoard();
+  // Safety net, ahead of every other handler: any pointerdown that lands
+  // outside the currently-focused note text blurs it first. Without this,
+  // preventDefault() calls elsewhere in the drag/select logic can block the
+  // browser's normal "clicking away" blur and the caret stays stuck in a note.
+  document.addEventListener('pointerdown', (e)=>{
+    const target = e.target;
+    const ae = document.activeElement;
+    if(ae && ae.isContentEditable && !ae.contains(target)){
+      blurActiveEditor();
+    }
+    // Belt and suspenders: some browsers focus the nearest contenteditable as
+    // part of the click's own default handling, even when the click visually
+    // landed elsewhere on the canvas. Catch that after the fact and undo it.
+    setTimeout(()=>{
+      const now = document.activeElement;
+      if(now && now.isContentEditable && !now.contains(target) && now!==target){
+        now.blur();
+        const sel = window.getSelection && window.getSelection();
+        if(sel) sel.removeAllRanges();
+      }
+    }, 0);
+  }, true);
+  setupPanTool();
   document.getElementById('canvas-wrapper').addEventListener('pointerdown', (e)=>{
     if(arrowMode && e.target.id==='canvas-wrapper'){
       // click on empty space cancels pending arrow
       pendingSource=null;
       document.querySelectorAll('.elm').forEach(el=>el.style.outline='');
     }
+    if(!arrowMode && !panMode && e.button===0 && isBackgroundTarget(e)){
+      startMarquee(e);
+    }
   });
+  document.addEventListener('keydown', (e)=>{
+    const tag = document.activeElement && document.activeElement.tagName;
+    const editing = tag==='TEXTAREA' || tag==='INPUT' || (document.activeElement && document.activeElement.isContentEditable);
+    if(editing || !(e.ctrlKey || e.metaKey)) return;
+    if(e.key==='c' || e.key==='C'){
+      if(copySelectedElement()) e.preventDefault();
+    } else if(e.key==='x' || e.key==='X'){
+      if(cutSelectedElement()) e.preventDefault();
+    } else if(e.key==='v' || e.key==='V'){
+      if(pasteElement()) e.preventDefault();
+    }
+  });
+}
+
+function blurActiveEditor(){
+  if(document.activeElement && document.activeElement.isContentEditable){
+    document.activeElement.blur();
+  }
+  const sel = window.getSelection && window.getSelection();
+  if(sel) sel.removeAllRanges();
+}
+
+function setPanMode(on){
+  panMode = on;
+  if(on && arrowMode){ toggleArrowModeOff(); pendingSource=null; }
+  document.getElementById('canvas-wrapper').classList.toggle('pan-mode', on);
+  document.getElementById('tool-pan').classList.toggle('active', on);
+  document.getElementById('tool-select').classList.toggle('active', !on);
+  blurActiveEditor();
+}
+
+// true when the pointer is on empty board space (not on an element, arrow or scrollbar)
+function isBackgroundTarget(e){
+  const t = e.target;
+  if(t.id==='canvas' || t.id==='zoom-stage') return true;
+  if(t.id==='canvas-wrapper'){
+    const r = t.getBoundingClientRect();
+    return e.clientX < r.left + t.clientWidth && e.clientY < r.top + t.clientHeight;
+  }
+  return false;
+}
+
+function setupPanTool(){
+  const wrap = document.getElementById('canvas-wrapper');
+  document.getElementById('tool-select').addEventListener('click', ()=>setPanMode(false));
+  document.getElementById('tool-pan').addEventListener('click', ()=>setPanMode(true));
+  // Hand tool: dragging empty space moves the view. Elements, arrows and links behave
+  // exactly as with the cursor tool.
+  wrap.addEventListener('pointerdown', (e)=>{
+    if(!panMode || e.button!==0 || arrowMode || !isBackgroundTarget(e)) return;
+    e.preventDefault(); e.stopPropagation();
+    blurActiveEditor();
+    if(!(e.shiftKey || e.ctrlKey || e.metaKey)) deselectElement();
+    const sx=e.clientX, sy=e.clientY, sl=wrap.scrollLeft, st=wrap.scrollTop;
+    wrap.classList.add('panning');
+    function onMove(ev){
+      wrap.scrollLeft = sl-(ev.clientX-sx);
+      wrap.scrollTop = st-(ev.clientY-sy);
+    }
+    function onUp(){
+      wrap.classList.remove('panning');
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onUp);
+    }
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', onUp);
+  }, true);
+}
+
+// Cursor tool: dragging empty space draws a selection rectangle
+function startMarquee(e){
+  e.preventDefault();
+  blurActiveEditor();
+  const additive = e.shiftKey || e.ctrlKey || e.metaKey;
+  const b = board();
+  const base = additive && selectedBoardId===b.id ? new Set(selectedIds) : new Set();
+  if(!additive) deselectElement();
+  const sx=e.clientX, sy=e.clientY;
+  let box = null;
+  function onMove(ev){
+    if(!box){
+      if(Math.hypot(ev.clientX-sx, ev.clientY-sy) < 5) return;
+      box = document.createElement('div');
+      box.className = 'marquee';
+      document.body.appendChild(box);
+    }
+    const l=Math.min(sx,ev.clientX), t=Math.min(sy,ev.clientY);
+    const w=Math.abs(ev.clientX-sx), h=Math.abs(ev.clientY-sy);
+    box.style.left=l+'px'; box.style.top=t+'px'; box.style.width=w+'px'; box.style.height=h+'px';
+    const hits = new Set(base);
+    document.querySelectorAll('#canvas .elm').forEach(n=>{
+      const r = n.getBoundingClientRect();
+      if(r.right>=l && r.left<=l+w && r.bottom>=t && r.top<=t+h) hits.add(n.dataset.id);
+    });
+    selectedIds = hits; selectedBoardId = b.id;
+    applySelectionVisuals();
+  }
+  function onUp(){
+    if(box) box.remove();
+    document.removeEventListener('pointermove', onMove);
+    document.removeEventListener('pointerup', onUp);
+  }
+  document.addEventListener('pointermove', onMove);
+  document.addEventListener('pointerup', onUp);
+}
+
+function applySelectionVisuals(){
+  document.querySelectorAll('.elm').forEach(n=>n.classList.toggle('selected', selectedIds.has(n.dataset.id)));
+}
+
+function deselectElement(){
+  selectedIds = new Set();
+  selectedBoardId = null;
+  applySelectionVisuals();
+}
+
+function selectedElementsData(){
+  const b = state.boards[selectedBoardId];
+  if(!b) return [];
+  return [...selectedIds].map(id=>(b.elements||[]).find(e=>e.id===id)).filter(Boolean);
+}
+
+function copySelectedElement(){
+  const items = selectedElementsData();
+  if(!items.length) return false;
+  const minX = Math.min(...items.map(i=>i.x)), minY = Math.min(...items.map(i=>i.y));
+  elementClipboard = items.map(it=>{
+    const c = JSON.parse(JSON.stringify(it));
+    c._oldId = it.id;
+    c._dx = it.x-minX; c._dy = it.y-minY;
+    delete c.id;
+    return c;
+  });
+  return true;
+}
+
+function cutSelectedElement(){
+  const items = selectedElementsData();
+  if(!items.length) return false;
+  copySelectedElement();
+  const b = state.boards[selectedBoardId];
+  const ids = new Set(items.map(i=>i.id));
+  b.elements = (b.elements||[]).filter(e=>!ids.has(e.id));
+  b.elements.forEach(e=>{ if(e.colId && ids.has(e.colId)) e.colId = null; });
+  (b.elements).filter(e=>e.type==='column').forEach(col=>{
+    if(col.order) col.order = col.order.filter(id=>!ids.has(id));
+  });
+  if(b.arrows) b.arrows = b.arrows.filter(a=>!ids.has(a.fromId) && !ids.has(a.toId));
+  deselectElement();
+  scheduleSave();
+  renderBoardContent(b);
+  return true;
+}
+
+function pasteElement(){
+  if(!elementClipboard || !elementClipboard.length) return false;
+  const b = board();
+  if(!b.elements) b.elements = [];
+  const pos = viewportCenter();
+  const idMap = {};
+  const pasted = elementClipboard.map(c=>{
+    const el = JSON.parse(JSON.stringify(c));
+    el.id = uid('e');
+    idMap[c._oldId] = el.id;
+    el.x = pos.x + (c._dx||0); el.y = pos.y + (c._dy||0);
+    delete el._oldId; delete el._dx; delete el._dy;
+    return el;
+  });
+  // keep columns and their contents together when both were copied
+  pasted.forEach(el=>{
+    if(el.colId) { if(idMap[el.colId]) el.colId = idMap[el.colId]; else delete el.colId; }
+    if(el.type==='column') el.order = (el.order||[]).map(id=>idMap[id]).filter(Boolean);
+  });
+  pasted.forEach(el=>b.elements.push(el));
+  selectedIds = new Set(pasted.map(p=>p.id));
+  selectedBoardId = b.id;
+  scheduleSave();
+  renderBoardContent(b);
+  return true;
 }
 
 /* ---------------- central formatting console ---------------- */
