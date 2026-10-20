@@ -425,6 +425,7 @@
     border:2px solid #000;box-shadow:0 0 0 1.5px #fff;opacity:0;transition:opacity .12s;cursor:grab;
   }
   .arrow-label.dot.show-dot{opacity:1;}
+  .arrow-label.dot.end{width:12px;height:12px;z-index:6;}
   #zoom-level{
     font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-muted);
     width:42px;text-align:center;
@@ -1935,6 +1936,24 @@ function arrowCurveOffset(arr, p1, p2){
   return {x:(-dy/len)*bend, y:(dx/len)*bend};
 }
 
+function anchorPoint(bbox, a){
+  return {x: bbox.x + a.fx*bbox.w, y: bbox.y + a.fy*bbox.h};
+}
+
+// nearest point on the block's border to (px,py), as {fx,fy} fractions; snaps to the
+// middle of a side when close to it
+function snapToBorder(bb, px, py){
+  const x = Math.min(Math.max(px, bb.x), bb.x+bb.w);
+  const y = Math.min(Math.max(py, bb.y), bb.y+bb.h);
+  const dl=x-bb.x, dr=bb.x+bb.w-x, dt=y-bb.y, db=bb.y+bb.h-y;
+  const m = Math.min(dl,dr,dt,db);
+  let fx=(x-bb.x)/bb.w, fy=(y-bb.y)/bb.h;
+  if(m===dl) fx=0; else if(m===dr) fx=1; else if(m===dt) fy=0; else fy=1;
+  if(Math.abs(fx-0.5)*bb.w < 8) fx = 0.5;
+  if(Math.abs(fy-0.5)*bb.h < 8) fy = 0.5;
+  return {fx, fy};
+}
+
 function drawArrows(b){
   if(b.type==='timeline') return; // the timeline's own spine/connectors share this SVG layer and don't support arrows
   const svg = document.getElementById('arrow-layer');
@@ -1951,8 +1970,12 @@ function drawArrows(b){
     const fb = elBBox(from), tb = elBBox(to);
     const fc = {x:fb.x+fb.w/2, y:fb.y+fb.h/2};
     const tc = {x:tb.x+tb.w/2, y:tb.y+tb.h/2};
-    const p1 = edgePoint(fb, tc.x, tc.y);
-    const p2 = edgePoint(tb, fc.x, fc.y);
+    // each end either follows the other block automatically, or sits at a point the
+    // user picked on the block's border (stored as a fraction of its width/height)
+    const fixedF = arr.fromAnchor ? anchorPoint(fb, arr.fromAnchor) : null;
+    const fixedT = arr.toAnchor ? anchorPoint(tb, arr.toAnchor) : null;
+    const p1 = fixedF || edgePoint(fb, fixedT ? fixedT.x : tc.x, fixedT ? fixedT.y : tc.y);
+    const p2 = fixedT || edgePoint(tb, fixedF ? fixedF.x : fc.x, fixedF ? fixedF.y : fc.y);
 
     const markerEndId = 'mk-end-'+arr.id;
     defs.innerHTML += '<marker id="'+markerEndId+'" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="'+arr.color+'"/></marker>';
@@ -2002,6 +2025,8 @@ function drawArrows(b){
 
     // midpoint chip: shows the label if any; on curved arrows it is also the handle
     // used to drag the curve in any direction (a small dot appears on hover)
+    const handles = [];
+    let showAll = ()=>{}, hideAll = ()=>{};
     if(arr.label || arr.curved){
       const chip = document.createElement('div');
       chip.className='arrow-label';
@@ -2012,14 +2037,7 @@ function drawArrows(b){
       } else {
         chip.classList.add('dot');
         chip.style.background=arr.color;
-        if(arrowDragId===arr.id) chip.classList.add('show-dot');
-        let hideTimer = null;
-        const showDot = ()=>{ clearTimeout(hideTimer); chip.classList.add('show-dot'); };
-        const hideDot = ()=>{ hideTimer = setTimeout(()=>{ if(arrowDragId!==arr.id) chip.classList.remove('show-dot'); }, 120); };
-        hit.addEventListener('mouseenter', showDot);
-        hit.addEventListener('mouseleave', hideDot);
-        chip.addEventListener('mouseenter', showDot);
-        chip.addEventListener('mouseleave', hideDot);
+        handles.push(chip);
       }
       if(arr.curved){
         chip.style.cursor='grab';
@@ -2029,6 +2047,57 @@ function drawArrows(b){
       }
       canvas.appendChild(chip);
     }
+
+    // end handles: drag either end to choose where on the block the arrow attaches
+    [['from', p1, from, fb], ['to', p2, to, tb]].forEach(([which, pt, elData, bb])=>{
+      const h = document.createElement('div');
+      h.className = 'arrow-label dot end';
+      h.style.left = pt.x+'px'; h.style.top = pt.y+'px';
+      h.style.background = arr.color;
+      h.title = 'Glisser pour choisir le point d\'attache (double-clic : automatique)';
+      attachArrowEndDrag(h, b, arr, which, bb);
+      canvas.appendChild(h);
+      handles.push(h);
+    });
+
+    let hideTimer = null;
+    showAll = ()=>{ clearTimeout(hideTimer); handles.forEach(h=>h.classList.add('show-dot')); };
+    hideAll = ()=>{ hideTimer = setTimeout(()=>{ if(arrowDragId!==arr.id) handles.forEach(h=>h.classList.remove('show-dot')); }, 120); };
+    if(arrowDragId===arr.id) handles.forEach(h=>h.classList.add('show-dot'));
+    hit.addEventListener('mouseenter', showAll);
+    hit.addEventListener('mouseleave', hideAll);
+    handles.forEach(h=>{ h.addEventListener('mouseenter', showAll); h.addEventListener('mouseleave', hideAll); });
+  });
+}
+
+function attachArrowEndDrag(h, b, arr, which, bb){
+  const key = which==='from' ? 'fromAnchor' : 'toAnchor';
+  h.addEventListener('pointerdown', (e)=>{
+    if(arrowMode) return;
+    e.preventDefault(); e.stopPropagation();
+    const canvas = document.getElementById('canvas');
+    let moved = false;
+    const sx=e.clientX, sy=e.clientY;
+    function onMove(ev){
+      if(!moved && Math.hypot(ev.clientX-sx, ev.clientY-sy)<4) return;
+      moved = true;
+      const r = canvas.getBoundingClientRect();
+      const px=(ev.clientX-r.left)/zoomLevel, py=(ev.clientY-r.top)/zoomLevel;
+      arr[key] = snapToBorder(bb, px, py);
+      arrowDragId = arr.id;
+      drawArrows(b);
+    }
+    function onUp(){
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onUp);
+      arrowDragId = null;
+      if(moved){ scheduleSave(); drawArrows(b); }
+    }
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', onUp);
+  });
+  h.addEventListener('dblclick', ()=>{
+    if(arr[key]){ delete arr[key]; scheduleSave(); drawArrows(b); }
   });
 }
 
@@ -2075,10 +2144,13 @@ function editOrDeleteArrow(b, arrowId){
     <label style="margin-top:14px;"><input type="checkbox" id="m-dashed" ${arr.dashed?'checked':''}> Pointillée</label><br>
     <label><input type="checkbox" id="m-curved" ${arr.curved?'checked':''}> Courbe</label><br>
     <label><input type="checkbox" id="m-double" ${arr.double?'checked':''}> Double sens</label>
+    ${(arr.fromAnchor||arr.toAnchor)?'<br><button type="button" class="tool" id="m-anchor-reset" style="margin-top:10px;">↺ Attache automatique</button>':''}
     <div id="modal-actions"><button class="danger" id="m-del">Supprimer</button><button id="m-cancel">Annuler</button><button class="primary" id="m-ok">Enregistrer</button></div>
   `);
   wireSwatches(modalBox);
   document.getElementById('m-cancel').onclick = closeModal;
+  const resetBtn = document.getElementById('m-anchor-reset');
+  if(resetBtn) resetBtn.onclick = ()=>{ delete arr.fromAnchor; delete arr.toAnchor; closeModal(); scheduleSave(); drawArrows(b); };
   document.getElementById('m-del').onclick = ()=>{
     b.arrows = b.arrows.filter(a=>a.id!==arrowId);
     closeModal(); scheduleSave(); drawArrows(b);
