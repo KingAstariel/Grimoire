@@ -426,6 +426,19 @@
   }
   .arrow-label.dot.show-dot{opacity:1;}
   .arrow-label.dot.end{width:12px;height:12px;z-index:6;}
+
+  /* board icon pastilles: always perfectly round, and dark text-style symbols
+     (chess pieces, etc.) in black so they stay readable on the light gold disc.
+     Colour emoji are unaffected by `color`. */
+  #board-icon-btn, .boardlink .bl-seal, .tl-linkchip .seal-mini, .icon-opt{
+    color:#000;
+    flex:none;
+    aspect-ratio:1/1;
+    box-sizing:border-box;
+    overflow:hidden;
+    line-height:1;
+    padding:0;
+  }
   #zoom-level{
     font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-muted);
     width:42px;text-align:center;
