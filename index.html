@@ -296,6 +296,8 @@
     display:flex;flex-direction:column;align-items:center;justify-content:center;
     gap:6px;
     text-align:center;
+    min-height:min-content; /* never let the text spill out of the block */
+    overflow-wrap:anywhere;
   }
   .boardlink .bl-seal{
     width:38px;height:38px;border-radius:50%;
@@ -303,6 +305,19 @@
     border:1px solid var(--gold-bright);
     display:flex;align-items:center;justify-content:center;font-size:19px;
   }
+  /* free-standing board links all share the height of a two-line name; longer names are
+     cut after two lines and the block stretches on hover to show the whole name */
+  .boardlink.bl-free{min-height:0;}
+  .boardlink.bl-free .bl-name{
+    height:2.6em;line-height:1.3;
+    display:flex;align-items:center;justify-content:center;
+  }
+  .boardlink.bl-free .bl-name span{
+    display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;
+  }
+  .boardlink.bl-free.expand{height:auto !important;z-index:30;}
+  .boardlink.bl-free.expand .bl-name{height:auto;min-height:2.6em;}
+  .boardlink.bl-free.expand .bl-name span{display:block;-webkit-line-clamp:unset;overflow:visible;}
   .boardlink .bl-name{
     font-family:'Cinzel',serif;font-size:13px;color:var(--gold-bright);
   }
@@ -416,6 +431,13 @@
     background:var(--ink);color:var(--gold-bright);cursor:pointer;font-size:16px;
   }
   #zoom-controls button:hover{border-color:var(--gold);}
+  #zoom-controls button.tool-mode, #zoom-controls button.hist-btn{
+    display:inline-flex;align-items:center;justify-content:center;
+    padding:0;line-height:1;text-align:center;
+  }
+  #zoom-controls button.tool-mode{font-size:15px;}
+  #zoom-controls button.hist-btn{font-size:18px;}
+  #zoom-controls button.hist-btn:disabled{opacity:.35;cursor:default;}
   #zoom-controls button.tool-mode.active{border-color:var(--gold-bright);background:var(--forest);}
   #canvas-wrapper.pan-mode, #canvas-wrapper.pan-mode #canvas{cursor:grab;}
   #canvas-wrapper.panning, #canvas-wrapper.panning *{cursor:grabbing !important;}
@@ -426,6 +448,24 @@
   }
   .arrow-label.dot.show-dot{opacity:1;}
   .arrow-label.dot.end{width:12px;height:12px;z-index:6;}
+  .search-input{width:100%;}
+  .search-results{max-height:55vh;overflow-y:auto;margin-top:10px;}
+  .search-section{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted);margin:12px 0 4px;}
+  .search-row{
+    padding:7px 10px;border-radius:6px;cursor:pointer;border:1px solid transparent;
+    display:flex;flex-direction:column;gap:2px;
+  }
+  .search-row:hover, .search-row.first{background:rgba(213,172,78,.12);border-color:var(--umber);}
+  .search-row .sr-main{color:var(--gold-bright);}
+  .search-row .sr-path{font-size:12px;color:var(--text-muted);}
+  .search-row .sr-flag{color:#e8a05a;}
+  #toast{
+    position:fixed;bottom:64px;left:50%;transform:translateX(-50%);z-index:200;
+    background:var(--bg-panel);color:var(--gold-bright);border:1px solid var(--gold);
+    border-radius:8px;padding:6px 16px;font-family:'EB Garamond',serif;font-size:14px;
+    box-shadow:var(--shadow-deep);opacity:0;pointer-events:none;transition:opacity .2s;
+  }
+  #toast.show{opacity:1;}
 
   /* board icon pastilles: always perfectly round, and dark text-style symbols
      (chess pieces, etc.) in black so they stay readable on the light gold disc.
@@ -550,6 +590,7 @@
       <button class="tool" id="board-delete-btn" title="Supprimer ce board">🗑 Supprimer le board</button>
       <div class="toolbar-sep"></div>
       <input type="file" id="backup-file-input" accept="application/json" style="display:none;">
+      <button class="tool" id="search-btn" title="Chercher un board, une colonne ou une note (Ctrl+K)">🔍 Chercher</button>
       <button class="tool" id="backup-export-btn" title="Télécharger une sauvegarde complète">💾 Exporter</button>
       <button class="tool" id="backup-import-btn" title="Restaurer depuis une sauvegarde">📂 Importer</button>
     </div>
@@ -565,6 +606,9 @@
     </div>
   </div>
   <div id="zoom-controls">
+    <button id="tool-select" class="tool-mode active" title="Curseur : sélectionner et déplacer les éléments">↖</button>
+    <button id="tool-pan" class="tool-mode" title="Main : glisser pour déplacer la vue">✋</button>
+    <div class="toolbar-sep"></div>
     <button id="zoom-out">–</button>
     <span id="zoom-level">100%</span>
     <button id="zoom-in">+</button>
@@ -572,8 +616,8 @@
     <div class="toolbar-sep"></div>
     <button id="rte-console-toggle" title="Mise en forme du texte">🖋️</button>
     <div class="toolbar-sep"></div>
-    <button id="tool-select" class="tool-mode active" title="Curseur : sélectionner et déplacer les éléments">↖</button>
-    <button id="tool-pan" class="tool-mode" title="Main : glisser pour déplacer la vue">✋</button>
+    <button id="undo-btn" class="hist-btn" title="Annuler (Ctrl+Z)" disabled>↶</button>
+    <button id="redo-btn" class="hist-btn" title="Rétablir (Ctrl+Shift+Z)" disabled>↷</button>
   </div>
   <div id="rte-console">
     <div class="rte-console-header">
@@ -765,7 +809,98 @@ async function load(){
   if(!state.customColors) state.customColors = [];
 }
 
+/* ---------------- undo / redo ---------------- */
+// Snapshots of the whole workspace (minus which board is open). Rapid-fire changes
+// (typing, dragging) are grouped into a single step.
+let undoStack = [], redoStack = [];
+let baseSnap = null, burstBase = null, burstTimer = null, restoring = false;
+const HISTORY_LIMIT = 100;
+
+function snapshot(){
+  return JSON.stringify(state, (k,v)=> k==='currentId' ? undefined : v);
+}
+
+function noteChange(){
+  if(restoring || !state) return;
+  if(burstBase===null) burstBase = baseSnap;
+  clearTimeout(burstTimer);
+  burstTimer = setTimeout(commitBurst, 500);
+  updateHistoryButtons();
+}
+
+function commitBurst(){
+  clearTimeout(burstTimer); burstTimer = null;
+  const cur = snapshot();
+  if(burstBase!==null && burstBase!==cur){
+    undoStack.push(burstBase);
+    if(undoStack.length>HISTORY_LIMIT) undoStack.shift();
+    redoStack = [];
+  }
+  baseSnap = cur;
+  burstBase = null;
+  updateHistoryButtons();
+}
+
+function restoreSnapshot(snap){
+  restoring = true;
+  const keepId = state.currentId;
+  const keepNextId = state.nextId || 1;
+  const data = JSON.parse(snap);
+  // stay on the current board if it still exists, otherwise climb to the nearest one that does
+  let cur = keepId;
+  while(cur && !data.boards[cur]){
+    const old = state.boards[cur];
+    cur = old ? old.parentId : null;
+  }
+  data.currentId = cur || 'root';
+  data.nextId = Math.max(data.nextId||1, keepNextId);
+  state = data;
+  baseSnap = snapshot();
+  burstBase = null;
+  arrowDragId = null;
+  renderBoard();
+  scheduleSave();
+  restoring = false;
+  updateHistoryButtons();
+}
+
+function undo(){
+  if(burstBase!==null) commitBurst();
+  if(!undoStack.length){ toast('Rien à annuler'); return false; }
+  redoStack.push(snapshot());
+  restoreSnapshot(undoStack.pop());
+  toast('Annulé');
+  return true;
+}
+
+function redo(){
+  if(burstBase!==null) commitBurst();
+  if(!redoStack.length){ toast('Rien à rétablir'); return false; }
+  undoStack.push(snapshot());
+  restoreSnapshot(redoStack.pop());
+  toast('Rétabli');
+  return true;
+}
+
+let toastTimer = null;
+function updateHistoryButtons(){
+  const u = document.getElementById('undo-btn'), r = document.getElementById('redo-btn');
+  if(!u || !r) return;
+  u.disabled = !(undoStack.length || burstBase!==null);
+  r.disabled = !redoStack.length;
+}
+
+function toast(msg){
+  let t = document.getElementById('toast');
+  if(!t){ t = document.createElement('div'); t.id='toast'; document.body.appendChild(t); }
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(()=>t.classList.remove('show'), 1400);
+}
+
 function scheduleSave(){
+  noteChange();
   clearTimeout(saveTimer);
   saveTimer = setTimeout(async ()=>{
     try{ await storage.set('worldboard-state', JSON.stringify(state), false); }
@@ -843,6 +978,12 @@ async function getImage(key){
 }
 
 /* ---------------- helpers ---------------- */
+
+const BOARDLINK_FREE_H = 117; // natural height of a board link whose name takes two lines
+
+function itemsLabel(n){
+  return n+(n>1 ? ' éléments' : ' élément');
+}
 
 function countItems(b){
   if(b.type==='timeline') return (b.beats||[]).length;
@@ -1027,6 +1168,7 @@ async function importBackup(file){
       const rawId = k.indexOf('img:')===0 ? k.slice(4) : k;
       imageCache[rawId] = images[k];
     }
+    noteChange(); // the import itself can be undone
     state = bundle.state;
     if(!state.boards[state.currentId]) state.currentId = 'root';
     if(!state.customColors) state.customColors = [];
@@ -1038,6 +1180,7 @@ async function importBackup(file){
   }
 }
 
+document.getElementById('search-btn').addEventListener('click', ()=>openSearch());
 document.getElementById('backup-export-btn').addEventListener('click', exportBackup);
 document.getElementById('backup-import-btn').addEventListener('click', ()=>document.getElementById('backup-file-input').click());
 document.getElementById('backup-file-input').addEventListener('change', (e)=>{
@@ -1048,6 +1191,102 @@ document.getElementById('backup-file-input').addEventListener('change', (e)=>{
 /* ==================================================================
    BREADCRUMB + TOOLBAR
    ================================================================== */
+
+/* ---------------- search ---------------- */
+
+function plainText(html){
+  const d = document.createElement('div');
+  d.innerHTML = html || '';
+  return (d.textContent || '').replace(/\s+/g,' ').trim();
+}
+
+function boardPathText(id){
+  const names = boardPath(id).map(b=>b.name);
+  return names.length ? names.join(' › ') : '(board isolé)';
+}
+
+function openSearch(){
+  // boards that no board link points to are easy to lose track of: flag them
+  const linked = new Set();
+  Object.values(state.boards).forEach(bd=>(bd.elements||[]).forEach(e=>{ if(e.type==='boardlink') linked.add(e.targetId); }));
+  const norm = t=>(t||'').toString().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+
+  openModal(
+    '<h3>Chercher</h3>' +
+    '<input type="text" id="m-search" class="search-input" placeholder="Nom d\'un board, titre de colonne, texte d\'une note…" autocomplete="off">' +
+    '<div class="search-results" id="m-search-results"></div>' +
+    '<div id="modal-actions"><button id="m-cancel">Fermer</button></div>'
+  );
+  const input = document.getElementById('m-search');
+  const out = document.getElementById('m-search-results');
+  document.getElementById('m-cancel').onclick = closeModal;
+
+  function go(boardId, elId){
+    closeModal();
+    state.currentId = boardId;
+    scheduleSave();
+    renderBoard();
+    if(elId){
+      const node = document.querySelector('.elm[data-id="'+elId+'"]');
+      if(node){
+        selectedIds = new Set([elId]); selectedBoardId = boardId; applySelectionVisuals();
+        node.scrollIntoView({block:'center', inline:'center'});
+      }
+    }
+  }
+
+  function row(main, path, boardId, elId, flag){
+    return '<div class="search-row" data-board="'+boardId+'" data-el="'+(elId||'')+'">' +
+      '<span class="sr-main">'+main+'</span>' +
+      '<span class="sr-path">'+escapeHtml(path)+(flag?' <span class="sr-flag">· '+flag+'</span>':'')+'</span></div>';
+  }
+
+  function render(){
+    const q = norm(input.value.trim());
+    const boards = [], columns = [], notes = [];
+    Object.values(state.boards).forEach(bd=>{
+      const nameOk = !q || norm(bd.name).includes(q);
+      if(nameOk){
+        const n = (bd.elements||[]).length;
+        const orphan = bd.id!=='root' && !linked.has(bd.id);
+        boards.push(row(iconMarkup(bd,16)+' '+escapeHtml(bd.name),
+          boardPathText(bd.id)+' · '+n+(n>1?' éléments':' élément'), bd.id, null, orphan?'aucun lien ne mène à ce board':''));
+      }
+      (bd.elements||[]).forEach(e=>{
+        if(e.type==='column'){
+          const t = e.title || 'Colonne';
+          if(!q || norm(t).includes(q)){
+            const kids = (e.order||[]).length;
+            columns.push(row('▭ '+escapeHtml(t), 'Dans : '+boardPathText(bd.id)+' · '+kids+(kids>1?' éléments':' élément'), bd.id, e.id));
+          }
+        } else if(q && e.type==='note'){
+          const txt = plainText(e.text);
+          if(txt && norm(txt).includes(q)){
+            notes.push(row('🗒 '+escapeHtml(txt.length>90?txt.slice(0,90)+'…':txt), 'Dans : '+boardPathText(bd.id), bd.id, e.id));
+          }
+        }
+      });
+    });
+    const cap = a=>a.slice(0,60).join('');
+    out.innerHTML =
+      (columns.length ? '<div class="search-section">Colonnes ('+columns.length+')</div>'+cap(columns) : '') +
+      (boards.length ? '<div class="search-section">Boards ('+boards.length+')</div>'+cap(boards) : '') +
+      (notes.length ? '<div class="search-section">Notes ('+notes.length+')</div>'+cap(notes) : '') ||
+      '<div class="search-section">Aucun résultat</div>';
+    const first = out.querySelector('.search-row');
+    if(first) first.classList.add('first');
+    out.querySelectorAll('.search-row').forEach(r=>{
+      r.addEventListener('click', ()=>go(r.dataset.board, r.dataset.el||null));
+    });
+  }
+  input.addEventListener('input', render);
+  input.addEventListener('keydown', e=>{
+    if(e.key==='Enter'){ const f = out.querySelector('.search-row'); if(f) f.click(); }
+    if(e.key==='Escape') closeModal();
+  });
+  render();
+  input.focus();
+}
 
 function renderBreadcrumb(){
   const el = document.getElementById('breadcrumb');
@@ -1121,15 +1360,14 @@ document.getElementById('board-delete-btn').addEventListener('click', ()=>{
   if(!b.parentId) return;
   const toDelete = collectDescendantIds(b.id);
   const extra = toDelete.length-1;
-  if(!confirm('Supprimer « '+b.name+' »'+(extra>0? ' et ses '+extra+' board(s) imbriqué(s)':'')+' ? Cette action est irréversible.')) return;
+  if(!confirm('Supprimer « '+b.name+' »'+(extra>0? ' et ses '+extra+' board(s) imbriqué(s)':'')+' ? (Ctrl+Z pour annuler)')) return;
   const parentId = b.parentId;
   toDelete.forEach(id=>{
     const bd = state.boards[id];
     if(bd){
       (bd.elements||[]).forEach(el=>{
         if(el.type==='image' && el.imgKey){
-          try{ storage.delete('img:'+el.imgKey).catch(()=>{}); }catch(err){}
-          delete imageCache[el.imgKey];
+          // image data is kept in storage on purpose so that Ctrl+Z can bring the board back
         }
       });
       delete state.boards[id];
@@ -1332,7 +1570,7 @@ function buildElementNode(elData, b){
     const count = (elData.order||[]).length;
     const countLabel = document.createElement('div');
     countLabel.className='col-count';
-    countLabel.textContent = count+' élément(s)';
+    countLabel.textContent = itemsLabel(count);
     el.appendChild(countLabel);
     const delBtn = mkBtn('🗑', ()=>{ if(confirm('Supprimer cette colonne ? (son contenu sera libéré, pas supprimé)')){ removeElement(b, elData.id); } });
     toolbar.append(delBtn);
@@ -1377,22 +1615,31 @@ function buildElementNode(elData, b){
 
   else if(elData.type==='boardlink'){
     el.classList.add('boardlink');
-    el.style.height=(elData.h||110)+'px';
+    if(!elData.colId){
+      el.classList.add('bl-free');
+      el.style.height = BOARDLINK_FREE_H+'px';
+      elData.h = BOARDLINK_FREE_H;
+    } else {
+      el.style.height=(elData.h||110)+'px';
+    }
     const target = state.boards[elData.targetId];
     const isShortcut = target && target.parentId !== b.id;
     if(isShortcut) el.classList.add('is-shortcut');
     const seal = document.createElement('div');
     seal.className='bl-seal'; seal.innerHTML = target?iconMarkup(target,22):'❓';
     const name = document.createElement('div');
-    name.className='bl-name'; name.textContent = target?target.name:'(supprimé)';
+    name.className='bl-name';
+    const nameText = document.createElement('span');
+    nameText.textContent = target?target.name:'(supprimé)';
+    name.appendChild(nameText);
+    // only names that are really cut off stretch the block on hover; shorter ones stay still
+    el.addEventListener('mouseenter', ()=>{
+      if(el.classList.contains('bl-free') && nameText.scrollHeight > nameText.clientHeight+1) el.classList.add('expand');
+    });
+    el.addEventListener('mouseleave', ()=>el.classList.remove('expand'));
     const count = document.createElement('div');
-    count.className='bl-type'; count.textContent = (target?countItems(target):0)+' élément(s)';
+    count.className='bl-type'; count.textContent = itemsLabel(target?countItems(target):0);
     el.append(seal, name, count);
-    if(isShortcut){
-      const tag = document.createElement('div');
-      tag.className='bl-tag'; tag.textContent='raccourci';
-      el.appendChild(tag);
-    }
     const delBtn = mkBtn('🗑', ()=>{ if(confirm("Retirer ce lien (le board visé n'est pas supprimé) ?")){ removeElement(b, elData.id); } });
     toolbar.append(delBtn);
     el.addEventListener('dblclick', ()=>{
@@ -1480,10 +1727,11 @@ function findColumnUnder(elData, b, exclude){
   return null;
 }
 
-function findBoardLinkUnder(elData, b, excludeId){
+function findBoardLinkUnder(elData, b, exclude){
   const cx = elData.x + elData.w/2;
   const cy = elData.y + (elData.h||100)/2;
-  const links = (b.elements||[]).filter(e=>e.type==='boardlink' && e.id!==excludeId && state.boards[e.targetId]);
+  const ex = exclude instanceof Set ? exclude : new Set(exclude ? [exclude] : []);
+  const links = (b.elements||[]).filter(e=>e.type==='boardlink' && !ex.has(e.id) && state.boards[e.targetId]);
   for(const link of links){
     const w = link.w||130, h = link.h||110;
     if(cx>=link.x && cx<=link.x+w && cy>=link.y && cy<=link.y+h) return link;
@@ -1586,7 +1834,10 @@ function makeDraggable(el, elData, b){
     });
     const minStartX = Math.min(...[...group.values()].map(g=>g.x));
     const minStartY = Math.min(...[...group.values()].map(g=>g.y));
-    const canDropIntoBoard = roots.every(r=>r.type!=='boardlink');
+    // only loose elements can be dropped into a board — never a column (its own
+    // board links sit right under it), and never a link
+    const canDropIntoBoard = roots.every(r=>r.type!=='boardlink' && r.type!=='column');
+    const groupIds = new Set(group.keys());
     let moved = false;
     let hoverLinkNode = null;
     const DRAG_THRESHOLD = 6; // px of real mouse movement before a click/dblclick turns into a drag
@@ -1605,7 +1856,7 @@ function makeDraggable(el, elData, b){
         if(node){ node.style.left=g.data.x+'px'; node.style.top=g.data.y+'px'; }
       });
       if(canDropIntoBoard){
-        const link = findBoardLinkUnder(elData, b, null);
+        const link = findBoardLinkUnder(elData, b, groupIds);
         const linkEl = link ? document.querySelector('.elm[data-id="'+link.id+'"]') : null;
         if(hoverLinkNode && hoverLinkNode!==linkEl) hoverLinkNode.classList.remove('boardlink-target');
         if(linkEl) linkEl.classList.add('boardlink-target');
@@ -1625,7 +1876,7 @@ function makeDraggable(el, elData, b){
         return;
       }
       if(canDropIntoBoard){
-        const link = findBoardLinkUnder(elData, b, null);
+        const link = findBoardLinkUnder(elData, b, groupIds);
         if(link){
           moveElementsToBoard(b, state.boards[link.targetId], roots, elData);
           deselectElement();
@@ -1673,8 +1924,7 @@ function removeElement(b, id, isImage){
   if(idx>=0){
     const elData = b.elements[idx];
     if(isImage && elData.imgKey){
-      try{ storage.delete('img:'+elData.imgKey).catch(()=>{}); }catch(err){}
-      delete imageCache[elData.imgKey];
+      // image data is kept in storage on purpose so that Ctrl+Z can bring the image back
     }
     b.elements.splice(idx,1);
     if(elData.type==='column'){
@@ -2389,7 +2639,7 @@ function renderTimeline(b){
       const target = state.boards[beat.linkedBoardId];
       const chip = document.createElement('div');
       chip.className='tl-linkchip';
-      chip.innerHTML = '<span class="seal-mini">'+iconMarkup(target,14)+'</span> '+escapeHtml(target.name)+' · '+countItems(target)+' élément(s)';
+      chip.innerHTML = '<span class="seal-mini">'+iconMarkup(target,14)+'</span> '+escapeHtml(target.name)+' · '+itemsLabel(countItems(target));
       chip.addEventListener('click', ()=>{ state.currentId=target.id; scheduleSave(); renderBoard(); });
       footer.appendChild(chip);
     } else {
@@ -2614,6 +2864,7 @@ function openActsModal(){
 
 async function init(){
   await load();
+  baseSnap = snapshot();
   renderBoard();
   // Safety net, ahead of every other handler: any pointerdown that lands
   // outside the currently-focused note text blurs it first. Without this,
@@ -2638,6 +2889,9 @@ async function init(){
     }, 0);
   }, true);
   setupPanTool();
+  document.getElementById('undo-btn').addEventListener('click', ()=>undo());
+  document.getElementById('redo-btn').addEventListener('click', ()=>redo());
+  updateHistoryButtons();
   document.getElementById('canvas-wrapper').addEventListener('pointerdown', (e)=>{
     if(arrowMode && e.target.id==='canvas-wrapper'){
       // click on empty space cancels pending arrow
@@ -2654,6 +2908,15 @@ async function init(){
     if(editing || !(e.ctrlKey || e.metaKey)) return;
     if(e.key==='c' || e.key==='C'){
       if(copySelectedElement()) e.preventDefault();
+    } else if(e.key==='k' || e.key==='K'){
+      e.preventDefault();
+      openSearch();
+    } else if(e.key==='z' || e.key==='Z'){
+      e.preventDefault();
+      if(e.shiftKey) redo(); else undo();
+    } else if(e.key==='y' || e.key==='Y'){
+      e.preventDefault();
+      redo();
     } else if(e.key==='x' || e.key==='X'){
       if(cutSelectedElement()) e.preventDefault();
     } else if(e.key==='v' || e.key==='V'){
